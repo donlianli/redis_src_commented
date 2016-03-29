@@ -3,7 +3,10 @@
  */
 
 #include <sys/epoll.h>
-
+/**
+ * 记录epoll模式下跟epoll相关的
+ * epfd,以及epoll的事件数量
+ */
 typedef struct aeApiState {
     int epfd;
     struct epoll_event *events;
