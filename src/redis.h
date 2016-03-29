@@ -498,9 +498,10 @@ typedef struct redisClient {
     // 命令，以及上个命令
     struct redisCommand *cmd, *lastcmd;
 
-    // 回复类型
+    // 客户端请求类型，分两种，REDIS_REQ_INLINE; REDIS_REQ_MULTIBULK
     int reqtype;
-    int multibulklen;       /* number of multi bulk arguments left to read */
+    int multibulklen;       /* number of multi bulk arguments left to read multibulklen
+    						   代表本次请求中，有多少个参数(bulk string)等待解析（读取）。当客户端首次连接时，这个值为0*/
     long bulklen;           /* length of bulk argument in multi bulk request */
 
     // 保存回复的链表

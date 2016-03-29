@@ -1036,6 +1036,7 @@ int processMultibulkBuffer(redisClient *c) {
     long long ll;
 
     if (c->multibulklen == 0) {
+    	//multibulklen代表本次请求中，有多少个参数(bulk string)等待解析。当客户端首次连接时，这个值为0
         /* The client should have been reset */
         redisAssertWithInfo(c,NULL,c->argc == 0);
 
@@ -1049,15 +1050,28 @@ int processMultibulkBuffer(redisClient *c) {
             return REDIS_ERR;
         }
 
-        /* Buffer should also contain \n */
+        /* Buffer should also contain \n
+		  * 判断数据还没有接收完毕，为啥要依据这个？
+		  * 假设目前querybuf="*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"
+		  * 则newline-(c->querybuf)==2
+		  * (signed)sdslen(c->querybuf)-2)==20,条件不成立
+		  * 假设接收的querybuf="*2\r"
+		  * 则newline-(c->querybuf)==2
+		  * (signed)sdslen(c->querybuf)-2)==1,条件成立
+		  *
+		  * 因此这个判断的主要用途是判断第一个参数是否接收完毕。
+		  * 即判断协议中第一行的内容是否已经接收完整
+		  * */
         if (newline-(c->querybuf) > ((signed)sdslen(c->querybuf)-2))
             return REDIS_ERR;
 
         /* We know for sure there is a whole line since newline != NULL,
          * so go ahead and find out the multi bulk length. */
         redisAssertWithInfo(c,NULL,c->querybuf[0] == '*');
+        /** 计算请求参数(Bulk Strings)的个数 */
         ok = string2ll(c->querybuf+1,newline-(c->querybuf+1),&ll);
         if (!ok || ll > 1024*1024) {
+        	//如果请求中的参数个数大于1024*024，则直接回复错误信息
             addReplyError(c,"Protocol error: invalid multibulk length");
             setProtocolError(c,pos);
             return REDIS_ERR;
