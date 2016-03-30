@@ -464,10 +464,15 @@ sds sdstrim(sds s, const char *cset) {
     sh->len = len;
     return s;
 }
-
+/**
+ * 此方法相类似java方法的substring，但是新的字符串不用申请新的内存。
+ * 执行此方法后，新的字符串长度将更短。
+ * e.g s="*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n" start=4,end=-1
+ * 则执行此方法后s=“$3\r\nfoo\r\n$3\r\nbar\r\n”
+ */
 sds sdsrange(sds s, int start, int end) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
-    size_t newlen, len = sdslen(s);
+    size_t newlen, len = sdslen(s);//len代表原字符串的长度,newlen代表截取后的长度
 
     if (len == 0) return s;
     if (start < 0) {
@@ -489,8 +494,13 @@ sds sdsrange(sds s, int start, int end) {
     } else {
         start = 0;
     }
+    /**
+     * 相当于将buf的内容往前进行了移动，从而给sh结构体腾出空闲块。
+     */
     if (start && newlen) memmove(sh->buf, sh->buf+start, newlen);
+    //设置字符串最后一个字符为0
     sh->buf[newlen] = 0;
+    //增加free的字节数
     sh->free = sh->free+(sh->len-newlen);
     sh->len = newlen;
     return s;
