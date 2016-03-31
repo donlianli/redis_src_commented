@@ -1,6 +1,6 @@
 /*
- * redis读取和写入网络数据的处理方法，主要负责与操作系统进行交互，并且负责将redis协议转换
- * 为对应的redis服务器内部命令
+ * redis读取和写入网络数据的处理方法，主要负责与操作系统网络接口进行交互.
+ * 负责redis协议的解析。
  */
 
 #include "redis.h"
@@ -26,7 +26,8 @@ int listMatchObjects(void *a, void *b) {
 }
 
 /*
- * 创建新的客户端实例
+ * 创建新的客户端连接
+ * 当有客户端请求到来时，调用此方法
  */
 redisClient *createClient(int fd) {
     redisClient *c = zmalloc(sizeof(redisClient));
@@ -49,7 +50,7 @@ redisClient *createClient(int fd) {
         }
     }
 
-    // 数据库
+    // 选择数据库
     selectDb(c,0);
 
     // 文件描述符
@@ -66,7 +67,7 @@ redisClient *createClient(int fd) {
     c->argv = NULL;
     c->cmd = c->lastcmd = NULL;
 
-    // 回复
+
     c->multibulklen = 0;
     c->bulklen = -1;
     c->sentlen = 0;
@@ -1036,6 +1037,7 @@ int processMultibulkBuffer(redisClient *c) {
     long long ll;
 
     if (c->multibulklen == 0) {
+    	//multibulklen代表本次请求中，有多少个参数(bulk string)等待解析。当客户端首次连接时，这个值为0
         /* The client should have been reset */
         redisAssertWithInfo(c,NULL,c->argc == 0);
 
@@ -1049,37 +1051,57 @@ int processMultibulkBuffer(redisClient *c) {
             return REDIS_ERR;
         }
 
-        /* Buffer should also contain \n */
+        /* Buffer should also contain \n
+		  * 判断本行数据有没有接收完毕。第一行内容接收完毕的标记是遇到\R\N。
+		  * 假设目前querybuf="*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"
+		  * 则newline-(c->querybuf)==2
+		  * (signed)sdslen(c->querybuf)-2)==20,条件不成立，此时状态是正常的，可以正常往下走
+		  * 假设接收的querybuf="*2\r"
+		  * 则newline-(c->querybuf)==2
+		  * (signed)sdslen(c->querybuf)-2)==1,条件成立。此时状态是错误的，直接返回REDIS_ERR
+		  *
+		  * 因此这个判断的主要用途是判断第一个参数是否接收完毕。
+		  * 即判断协议中第一行的内容是否已经接收完整
+		  * */
         if (newline-(c->querybuf) > ((signed)sdslen(c->querybuf)-2))
             return REDIS_ERR;
 
         /* We know for sure there is a whole line since newline != NULL,
          * so go ahead and find out the multi bulk length. */
         redisAssertWithInfo(c,NULL,c->querybuf[0] == '*');
+        /** 计算客户端请求中大块字符串(Bulk Strings)的个数，并将结果存储到ll变量中 */
         ok = string2ll(c->querybuf+1,newline-(c->querybuf+1),&ll);
         if (!ok || ll > 1024*1024) {
+        	//如果请求中的大块字符串（bulk string)个数大于1024*024，则直接回复错误信息
             addReplyError(c,"Protocol error: invalid multibulk length");
             setProtocolError(c,pos);
             return REDIS_ERR;
         }
-
+        //这个变量是为下一步解析每个大块字符串（bulk string)做准备
         pos = (newline-c->querybuf)+2;
         if (ll <= 0) {
+        	//？这是什么情况？什么时候会进这个代码？
             c->querybuf = sdsrange(c->querybuf,pos,-1);
             return REDIS_OK;
         }
-
+        //将本客户端请求中大块字符串(bulk string)的个数记录下
         c->multibulklen = ll;
 
-        /* Setup argv array on client structure */
+        /* Setup argv array on client structure
+         * 为后面进一步的解析分配内存空间，因为已经明确后面会有多少个大块字符串，
+         * 所以内存空间直接使用robj结构体乘以multibulklen */
         if (c->argv) zfree(c->argv);
         c->argv = zmalloc(sizeof(robj*)*c->multibulklen);
     }
 
     redisAssertWithInfo(c,NULL,c->multibulklen > 0);
+    /**
+     * 下面请求中的大块字符串(bulk string)
+     */
     while(c->multibulklen) {
         /* Read bulk length if unknown */
         if (c->bulklen == -1) {
+        	//如果是第一次解析，bulken肯定没有。
             newline = strchr(c->querybuf+pos,'\r');
             if (newline == NULL) {
                 if (sdslen(c->querybuf) > REDIS_INLINE_MAX_SIZE) {
@@ -1089,25 +1111,30 @@ int processMultibulkBuffer(redisClient *c) {
                 break;
             }
 
-            /* Buffer should also contain \n */
+            /* Buffer should also contain \n
+             * 确保本行内容已经接受完毕 */
             if (newline-(c->querybuf) > ((signed)sdslen(c->querybuf)-2))
                 break;
-
+            /**
+             * 大块字符串的第一个参数为大块字符串的长度
+             */
             if (c->querybuf[pos] != '$') {
+            	//客户端请求格式错误
                 addReplyErrorFormat(c,
                     "Protocol error: expected '$', got '%c'",
                     c->querybuf[pos]);
                 setProtocolError(c,pos);
                 return REDIS_ERR;
             }
-
+            //读取大块字符串的长度，并将值设置到ll变量中
             ok = string2ll(c->querybuf+pos+1,newline-(c->querybuf+pos+1),&ll);
             if (!ok || ll < 0 || ll > 512*1024*1024) {
+            	//大块字符串的长度不能超过512M
                 addReplyError(c,"Protocol error: invalid bulk length");
                 setProtocolError(c,pos);
                 return REDIS_ERR;
             }
-
+            //pos继续往后移动
             pos += newline-(c->querybuf+pos)+2;
             if (ll >= REDIS_MBULK_BIG_ARG) {
                 /* If we are going to read a large object from network
@@ -1209,6 +1236,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     REDIS_NOTUSED(mask);
 
     server.current_client = c;
+    //默认为16k
     readlen = REDIS_IOBUF_LEN;
     /* If this is a multi bulk request, and we are processing a bulk reply
      * that is large enough, try to maximize the probability that the query
@@ -1227,6 +1255,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     // 分配空间
     qblen = sdslen(c->querybuf);
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
+    //首次分配16k的缓存
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
     
     // 读入到 buf
@@ -1249,10 +1278,12 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
 
     // 根据读入情况更新客户端统计数据
     if (nread) {
+    	//根据读取的字节数，更新字符串的长度
         sdsIncrLen(c->querybuf,nread);
-        // 最后一次交互时间
+        // 更新最后一次交互时间
         c->lastinteraction = server.unixtime;
     } else {
+    	//从上面对nread的if else分支中，可以看出，可能会存在n==0的情况（比如nread==-1的时候，就把nread设置成了0
         server.current_client = NULL;
         return;
     }
@@ -1269,7 +1300,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
         return;
     }
 
-    // 执行命令
+    // 对已经收到的数据进行解析（decode),然后执行命令
     processInputBuffer(c);
 
     server.current_client = NULL;
