@@ -1030,14 +1030,17 @@ static void setProtocolError(redisClient *c, int pos) {
     c->flags |= REDIS_CLOSE_AFTER_REPLY;
     c->querybuf = sdsrange(c->querybuf,pos,-1);
 }
-
+/**
+ * 开始对客户端请求大块字符串数组的每个元素进行解析，如果解析完毕并且完整，则调用相应的
+ * redis内部命令
+ */
 int processMultibulkBuffer(redisClient *c) {
     char *newline = NULL;
     int pos = 0, ok;
     long long ll;
 
     if (c->multibulklen == 0) {
-    	//multibulklen代表本次请求中，有多少个参数(bulk string)等待解析。当客户端首次连接时，这个值为0
+    	//multibulklen代表本次请求中，有多少个参数(bulk string)等待解析。这个值初始化为0
         /* The client should have been reset */
         redisAssertWithInfo(c,NULL,c->argc == 0);
 
@@ -1061,7 +1064,7 @@ int processMultibulkBuffer(redisClient *c) {
 		  * (signed)sdslen(c->querybuf)-2)==1,条件成立。此时状态是错误的，直接返回REDIS_ERR
 		  *
 		  * 因此这个判断的主要用途是判断第一个参数是否接收完毕。
-		  * 即判断协议中第一行的内容是否已经接收完整
+		  * 即判断请求数据第一行的内容是否已经接收完整
 		  * */
         if (newline-(c->querybuf) > ((signed)sdslen(c->querybuf)-2))
             return REDIS_ERR;
@@ -1081,7 +1084,12 @@ int processMultibulkBuffer(redisClient *c) {
         pos = (newline-c->querybuf)+2;
         if (ll <= 0) {
         	//？这是什么情况？什么时候会进这个代码？
+        	/**
+        	 * 当数组的这个元素是空的时候，ll==-1,此时表示后面已经不会出现value行。
+        	 * 可以直接将已经解析掉的字符清理掉。
+        	 */
             c->querybuf = sdsrange(c->querybuf,pos,-1);
+            //如果请求的参数个数为0或者小于0，则没有必要继续解析
             return REDIS_OK;
         }
         //将本客户端请求中大块字符串(bulk string)的个数记录下
@@ -1096,12 +1104,12 @@ int processMultibulkBuffer(redisClient *c) {
 
     redisAssertWithInfo(c,NULL,c->multibulklen > 0);
     /**
-     * 下面请求中的大块字符串(bulk string)
+     * 下面逐个解析请求中的大块字符串(bulk string)
      */
     while(c->multibulklen) {
         /* Read bulk length if unknown */
         if (c->bulklen == -1) {
-        	//如果是第一次解析，bulken肯定没有。
+        	//进入这里，说明对应数组元素的长度还未解析出来
             newline = strchr(c->querybuf+pos,'\r');
             if (newline == NULL) {
                 if (sdslen(c->querybuf) > REDIS_INLINE_MAX_SIZE) {
@@ -1170,11 +1178,18 @@ int processMultibulkBuffer(redisClient *c) {
                 c->querybuf = sdsMakeRoomFor(c->querybuf,c->bulklen+2);
                 pos = 0;
             } else {
+            	//走到这里，说明大块字符串的值已经明确，然后将字符串的值放入c->argv数组中
+            	/*
+            	 * 从这里可以推断，c->argc放着c->argv的数组的长度
+            	 * c->argv的内容应该是类似这样的["get", "somekey"]
+            	 * 或者["set","somekey","hello"]
+            	 */
                 c->argv[c->argc++] =
                     createStringObject(c->querybuf+pos,c->bulklen);
                 pos += c->bulklen+2;
             }
             c->bulklen = -1;
+            //每当解析完毕一个数组元素，将c->multibulklen减少一次
             c->multibulklen--;
         }
     }
@@ -1188,7 +1203,11 @@ int processMultibulkBuffer(redisClient *c) {
     /* Still not read to process the command */
     return REDIS_ERR;
 }
-
+/**
+ * 大部分情况，到这里的时候，数据已经读取完毕，并已经存入querybuf。
+ * 以下情况，到这个函数的时候，请求的数据可能还没有接收完毕
+ * 1、请求的数据比较多，超过16k
+ */
 void processInputBuffer(redisClient *c) {
     /* Keep processing while there is something in the input buffer */
     while(sdslen(c->querybuf)) {
@@ -1203,8 +1222,10 @@ void processInputBuffer(redisClient *c) {
         /* Determine request type when unknown. */
         if (!c->reqtype) {
             if (c->querybuf[0] == '*') {
+            	//请求参数是数组形式，大部分的请求应该属于这种类型
                 c->reqtype = REDIS_REQ_MULTIBULK;
             } else {
+            	//请求参数不是数组。
                 c->reqtype = REDIS_REQ_INLINE;
             }
         }
@@ -1227,7 +1248,9 @@ void processInputBuffer(redisClient *c) {
         }
     }
 }
-
+/**
+ * 从客户端读取请求数据，并对收到的数据进行解析，转换为redis对应的命令
+ */
 void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     redisClient *c = (redisClient*) privdata;
     int nread, readlen;
@@ -1236,7 +1259,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     REDIS_NOTUSED(mask);
 
     server.current_client = c;
-    //默认为16k
+    //接收缓存默认为16k
     readlen = REDIS_IOBUF_LEN;
     /* If this is a multi bulk request, and we are processing a bulk reply
      * that is large enough, try to maximize the probability that the query
