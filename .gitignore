@@ -16,3 +16,6 @@ local.properties
 .project
 .cproject
 .DS_Store
+src/.cproject
+src/project
+test/
