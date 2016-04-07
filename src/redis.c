@@ -1902,6 +1902,7 @@ int processCommand(redisClient *c) {
      * a regular command proc. */
     // 单独处理 QUIT 命令
     if (!strcasecmp(c->argv[0]->ptr,"quit")) {
+    	//如果是quit命令
         addReply(c,shared.ok);
         c->flags |= REDIS_CLOSE_AFTER_REPLY;
         return REDIS_ERR;

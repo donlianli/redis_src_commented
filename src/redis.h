@@ -467,7 +467,7 @@ typedef struct redisClient {
     // 参数的个数
     int argc;
 
-    // 字符串表示的命令，以及命令的参数
+    // 字符串表示的命令，以及命令的参数,robj的指针数组
     robj **argv;
 
     // 命令，以及上个命令

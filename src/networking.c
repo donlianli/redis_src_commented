@@ -1,5 +1,5 @@
 /*
- * redis读取和写入网络数据的处理方法，主要负责与操作系统网络接口进行交互.
+ * redis-server 读取和写入网络数据的处理方法，主要负责与操作系统网络接口进行交互.
  * 负责redis协议的解析。
  */
 
@@ -27,7 +27,7 @@ int listMatchObjects(void *a, void *b) {
 
 /*
  * 创建新的客户端连接
- * 当有客户端请求到来时，调用此方法
+ * 当有客户端请求到来时，首先调用此方法
  */
 redisClient *createClient(int fd) {
     redisClient *c = zmalloc(sizeof(redisClient));
@@ -1031,8 +1031,10 @@ static void setProtocolError(redisClient *c, int pos) {
     c->querybuf = sdsrange(c->querybuf,pos,-1);
 }
 /**
- * 开始对客户端请求大块字符串数组的每个元素进行解析，如果解析完毕并且完整，则调用相应的
+ * 开始对客户端请求大块字符串数组的每个元素进行解析，如果解析完毕querybuf并且请求的数据已经完整，则调用相应的
  * redis内部命令
+ * @return REDIS_OK 参数已经解析完毕。
+ * @return REDIS_ERR 参数还没有解析完整。
  */
 int processMultibulkBuffer(redisClient *c) {
     char *newline = NULL;
@@ -1160,7 +1162,8 @@ int processMultibulkBuffer(redisClient *c) {
 
         /* Read bulk argument */
         if (sdslen(c->querybuf)-pos < (unsigned)(c->bulklen+2)) {
-            /* Not enough data (+2 == trailing \r\n) */
+            /* Not enough data (+2 == trailing \r\n)
+             * 根据前面已经收到的长度和后面的数据的长度相比，判断数据是否已经读取完毕 */
             break;
         } else {
             /* Optimization: if the buffer contanins JUST our bulk element
@@ -1181,8 +1184,8 @@ int processMultibulkBuffer(redisClient *c) {
             	//走到这里，说明大块字符串的值已经明确，然后将字符串的值放入c->argv数组中
             	/*
             	 * 从这里可以推断，c->argc放着c->argv的数组的长度
-            	 * c->argv的内容应该是类似这样的["get", "somekey"]
-            	 * 或者["set","somekey","hello"]
+            	 * c->argv的内容应该是类似这样的[{"get"}, {"somekey"}]
+            	 * 或者[{"set"},{"somekey"},{"hello"}]
             	 */
                 c->argv[c->argc++] =
                     createStringObject(c->querybuf+pos,c->bulklen);
@@ -1200,16 +1203,19 @@ int processMultibulkBuffer(redisClient *c) {
     /* We're done when c->multibulk == 0 */
     if (c->multibulklen == 0) return REDIS_OK;
 
-    /* Still not read to process the command */
+    /* Still not read to process the command
+     * 客户端请求的参数还没有完全接收到*/
     return REDIS_ERR;
 }
 /**
- * 大部分情况，到这里的时候，数据已经读取完毕，并已经存入querybuf。
+ * 大部分情况，到这里的时候，请求数据已经读取完毕，并已经存入querybuf。
  * 以下情况，到这个函数的时候，请求的数据可能还没有接收完毕
  * 1、请求的数据比较多，超过16k
  */
 void processInputBuffer(redisClient *c) {
-    /* Keep processing while there is something in the input buffer */
+    /* Keep processing while there is something in the input buffer
+     * redis 每次解析完一个参数后，会将已经解析过的buffer给清理，这样
+     * 当querybuf==0的时候，表示已经解析完毕，不用再进行解析*/
     while(sdslen(c->querybuf)) {
         /* Immediately abort if the client is in the middle of something. */
         if (c->flags & REDIS_BLOCKED) return;
@@ -1220,7 +1226,7 @@ void processInputBuffer(redisClient *c) {
         if (c->flags & REDIS_CLOSE_AFTER_REPLY) return;
 
         /* Determine request type when unknown. */
-        if (!c->reqtype) {
+        if (!c->reqtype) { //如果reqtype==0
             if (c->querybuf[0] == '*') {
             	//请求参数是数组形式，大部分的请求应该属于这种类型
                 c->reqtype = REDIS_REQ_MULTIBULK;
@@ -1233,6 +1239,12 @@ void processInputBuffer(redisClient *c) {
         if (c->reqtype == REDIS_REQ_INLINE) {
             if (processInlineBuffer(c) != REDIS_OK) break;
         } else if (c->reqtype == REDIS_REQ_MULTIBULK) {
+        	/**
+        	 * 返回REDIS_OK,表示参数解析正确，并且已经
+        	 * 解析完整（请求参数已经读取完毕）相关的客户端命令都已经写入
+        	 * c->argv字符串数组；否则的话说明数据还没有接收完毕，比如，请求的参数可能只接收到一半
+        	 * 此时不应继续往下循环。
+        	 */
             if (processMultibulkBuffer(c) != REDIS_OK) break;
         } else {
             redisPanic("Unknown request type");
@@ -1242,7 +1254,9 @@ void processInputBuffer(redisClient *c) {
         if (c->argc == 0) {
             resetClient(c);
         } else {
-            /* Only reset the client when the command was executed. */
+            /* Only reset the client when the command was executed.
+             * 根据客户端的请求命令，调用服务器的内部相应函数
+             * 执行内部的业务逻辑 */
             if (processCommand(c) == REDIS_OK)
                 resetClient(c);
         }
@@ -1278,7 +1292,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     // 分配空间
     qblen = sdslen(c->querybuf);
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
-    //首次分配16k的缓存
+    //首次分配16k的缓存,如果是第二次读取，则扩展后，剩余的空间至少为16k
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
     
     // 读入到 buf
