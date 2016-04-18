@@ -1,6 +1,5 @@
 /*
- * redis-server 读取和写入网络数据的处理方法，主要负责与操作系统网络接口进行交互.
- * 负责redis协议的解析。
+ * 读取和写入网络数据的处理方法，主要负责redis协议的解析。
  */
 
 #include "redis.h"
@@ -978,7 +977,10 @@ void resetClient(redisClient *c) {
     /* We clear the ASKING flag as well if we are not inside a MULTI. */
     if (!(c->flags & REDIS_MULTI)) c->flags &= (~REDIS_ASKING);
 }
-
+/**
+ * 处理非*开头的请求
+ *
+ */
 int processInlineBuffer(redisClient *c) {
     char *newline = strstr(c->querybuf,"\r\n");
     int argc, j;
@@ -996,6 +998,10 @@ int processInlineBuffer(redisClient *c) {
 
     /* Split the input buffer up to the \r\n */
     querylen = newline-(c->querybuf);
+    /**
+     * 对本行的内容按照空格进行切分，将划分后的字符串数组
+     * 的大小存入argc
+     */
     argv = sdssplitlen(c->querybuf,querylen," ",1,&argc);
 
     /* Leave data after the first line of the query in the buffer */
@@ -1005,7 +1011,8 @@ int processInlineBuffer(redisClient *c) {
     if (c->argv) zfree(c->argv);
     c->argv = zmalloc(sizeof(robj*)*argc);
 
-    /* Create redis objects for all arguments. */
+    /* Create redis objects for all arguments.
+     * 将切分后的字符串转成redisObj后存储到c->argv */
     for (c->argc = 0, j = 0; j < argc; j++) {
         if (sdslen(argv[j])) {
             c->argv[c->argc] = createObject(REDIS_STRING,argv[j]);
@@ -1033,6 +1040,7 @@ static void setProtocolError(redisClient *c, int pos) {
 /**
  * 开始对客户端请求大块字符串数组的每个元素进行解析，如果解析完毕querybuf并且请求的数据已经完整，则调用相应的
  * redis内部命令
+ * 与processInlineBuffer的区别是这个处理的参数属于multibulk参数。即以*开头的请求
  * @return REDIS_OK 参数已经解析完毕。
  * @return REDIS_ERR 参数还没有解析完整。
  */
@@ -1122,7 +1130,7 @@ int processMultibulkBuffer(redisClient *c) {
             }
 
             /* Buffer should also contain \n
-             * 确保本行内容已经接受完毕 */
+             * 确保本行内容已经接收完毕 */
             if (newline-(c->querybuf) > ((signed)sdslen(c->querybuf)-2))
                 break;
             /**

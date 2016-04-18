@@ -465,8 +465,9 @@ sds sdstrim(sds s, const char *cset) {
     return s;
 }
 /**
- * 此方法相类似java方法的substring，但是新的字符串不用申请新的内存。
- * 执行此方法后，新的字符串长度将更短。
+ * 此方法相类似java方法的substring，但是返回的新字符串并不占用新内存，而是在原有内存的基础上取了
+ * 子集。sdsrange("abcde",2,-1)="cde"。
+ * 执行此方法后，新的字符串长度将是原字符串的子集。
  * e.g s="*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n" start=4,end=-1
  * 则执行此方法后s=“$3\r\nfoo\r\n$3\r\nbar\r\n”
  */
